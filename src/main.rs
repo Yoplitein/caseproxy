@@ -5,7 +5,8 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{anyhow, Context, Result as AResult};
+use anyhow::{anyhow, Context};
+use caseproxy::AResult;
 use clap::Parser;
 use hyper::{server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::TokioIo;

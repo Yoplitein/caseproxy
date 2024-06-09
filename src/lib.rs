@@ -1,6 +1,8 @@
 #![allow(unused, non_snake_case)]
 
-use std::{cmp::Ordering, ops::{Deref, DerefMut}, path::{Component, PathBuf}};
+use std::{cmp::Ordering, hash::{DefaultHasher, Hash, Hasher}, ops::{Deref, DerefMut}, path::{Component, PathBuf}};
+
+pub use anyhow::Result as AResult;
 
 #[derive(Clone, Debug, Eq)]
 pub struct InsensitivePath(pub PathBuf);
@@ -81,15 +83,50 @@ impl Ord for InsensitivePath {
 	}
 }
 
+impl Hash for InsensitivePath {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		let Ok(str) = std::str::from_utf8(self.0.as_os_str().as_encoded_bytes()) else {
+			panic!("file path {:?} contains non-UTF-8 bytes", self.0)
+		};
+		for char in str.chars().flat_map(char::to_lowercase) {
+			state.write_u32(char as u32);
+		}
+	}
+}
+
 #[test]
 fn test_insensitive_path() {
 	let a = InsensitivePath(PathBuf::from("foo"));
 	let b = InsensitivePath(PathBuf::from("Foo"));
 	assert_eq!(a, b);
 	
+	let aHash = {
+		let mut hasher = DefaultHasher::new();
+		a.hash(&mut hasher);
+		hasher.finish()
+	};
+	let bHash = {
+		let mut hasher = DefaultHasher::new();
+		b.hash(&mut hasher);
+		hasher.finish()
+	};
+	assert_eq!(aHash, bHash);
+	
 	let a = InsensitivePath(PathBuf::from("abc"));
 	let b = InsensitivePath(PathBuf::from("def"));
 	assert_ne!(a, b);
 	assert!(a < b);
 	assert!(b > a);
+	
+	let aHash = {
+		let mut hasher = DefaultHasher::new();
+		a.hash(&mut hasher);
+		hasher.finish()
+	};
+	let bHash = {
+		let mut hasher = DefaultHasher::new();
+		b.hash(&mut hasher);
+		hasher.finish()
+	};
+	assert_ne!(aHash, bHash);
 }
