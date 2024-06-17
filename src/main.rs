@@ -1,19 +1,18 @@
-#![allow(unused, non_snake_case)]
+#![allow(unused, non_snake_case, non_upper_case_globals)]
 
 use std::{
-    convert::Infallible,
-    path::PathBuf,
+    cell::OnceCell, convert::Infallible, path::{Path, PathBuf}, sync::OnceLock
 };
 
 use anyhow::{anyhow, Context};
-use caseproxy::AResult;
+use caseproxy::{resolve_parents, AResult, InsensitivePath};
 use clap::Parser;
-use hyper::{server::conn::http1, service::service_fn, Request, Response};
+use hyper::{server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, UnixListener};
 
 #[derive(Debug, Parser)]
-struct Args {
+struct Config {
     #[arg(short, long, conflicts_with = "socketPath")]
     port: Option<i16>,
 
@@ -30,15 +29,27 @@ struct Args {
     urlPrefix: String,
 }
 
+static serverConfig: OnceLock<Config> = OnceLock::new();
+
 #[tokio::main]
 async fn main() -> AResult<()> {
-    let args = argfile::expand_args(argfile::parse_fromfile, argfile::PREFIX)?;
-    let args = Args::try_parse_from(args)?;
-    dbg!(&args);
+    let expanded = argfile::expand_args(argfile::parse_fromfile, argfile::PREFIX)?;
+    let mut config = Config::try_parse_from(expanded)?;
+    
+    if !config.urlPrefix.starts_with("/") {
+        config.urlPrefix.insert(0, '/');
+    }
+    if !config.urlPrefix.ends_with("/") {
+        config.urlPrefix.push('/');
+    }
+    
+    serverConfig.set(config).unwrap();
+    let config = serverConfig.get().unwrap();
+    dbg!(config);
 
     if matches!(
-        args,
-        Args {
+        config,
+        Config {
             port: None,
             socketPath: None,
             ..
@@ -46,7 +57,7 @@ async fn main() -> AResult<()> {
     ) {
         return Err(anyhow!("One of --port or --socket-path must be given"));
     }
-
+    
     macro_rules! main_loop {
         ($listener:ident) => {
             loop {
@@ -64,8 +75,8 @@ async fn main() -> AResult<()> {
         };
     }
 
-    if let Some(port) = args.port {
-        let host = &format!("{}:{}", args.host, port);
+    if let Some(port) = config.port {
+        let host = &format!("{}:{}", config.host, port);
 
         let mut candidateAddresses = tokio::net::lookup_host(host)
             .await
@@ -81,7 +92,7 @@ async fn main() -> AResult<()> {
 
         let mut listener = TcpListener::bind(candidateAddresses.first().unwrap()).await?;
         main_loop!(listener)
-    } else if let Some(socketPath) = args.socketPath {
+    } else if let Some(socketPath) = &config.socketPath {
         let mut listener = UnixListener::bind(socketPath)?;
         main_loop!(listener)
     } else {
@@ -91,7 +102,43 @@ async fn main() -> AResult<()> {
 
 async fn handle_request(
     req: Request<impl hyper::body::Body>,
-) -> Result<Response<String>, Infallible> {
-    let body = format!("requested {:?}", req.uri());
-    Ok(Response::new(body))
+) -> AResult<Response<String>> {
+    let config = serverConfig.get().unwrap();
+    
+    let reqPath = Path::new(
+        req.uri().path()
+    ).strip_prefix(&config.urlPrefix)?;
+    let fullPath = resolve_parents(
+        &config.rootPath.join(reqPath)
+    );
+    let file = resolve_path(InsensitivePath(fullPath.clone())).await;
+    match file {
+        Ok(file) => {
+            // this check is not strictly necessary as it is sufficiently handled by prefix stripping in `find_matching_files`, but just in case that ever changes
+            if !file.starts_with(&config.rootPath) {
+                let mut res = Response::new(String::new());
+                *res.status_mut() = StatusCode::FORBIDDEN;
+                return Ok(res);
+            }
+            
+            let body = format!("requested {:?}\ngot {:?}\n", fullPath, file);
+            Ok(Response::new(body))
+        },
+        Err(err) => {
+            let body = format!("requested {:?} but 404\n\nerr:\n{err:#?}\n{:#?}\n", fullPath, err.backtrace());
+            let mut res = Response::new(body);
+            *res.status_mut() = StatusCode::NOT_FOUND;
+            Ok(res)
+        },
+    }
+}
+
+async fn resolve_path(path: InsensitivePath) -> AResult<PathBuf> {
+    let config = serverConfig.get().unwrap();
+    let files = tokio::task::spawn_blocking(move ||
+        path.find_matching_files(Some(&config.rootPath))
+    ).await??;
+    // TODO: other strategies
+    // TODO: caching
+    Ok(files.into_iter().next().ok_or_else(|| anyhow!("not found"))?)
 }

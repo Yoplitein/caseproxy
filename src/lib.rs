@@ -21,9 +21,7 @@ impl InsensitivePath {
 				self.strip_prefix(root)?.to_path_buf()
 			}
 		));
-		// dbg!(&queue);
 
-		// #[cfg(none)]
 		while let Some((mut prefix, mut remaining)) = queue.pop_front() {
 			let headPath = {
 				let mut components = remaining.components();
@@ -42,14 +40,12 @@ impl InsensitivePath {
 			let mut fullPath = PathBuf::new();
 			fullPath.push(root);
 			fullPath.push(&prefix);
-			// dbg!((&prefix, &remaining, &headPath, &fullPath));
 			if remaining.components().next().is_none() {
 				// head component is filename
 				for entry in read_dir(&fullPath)? {
 					let entry = entry?;
 					let filename = entry.file_name();
 					if compare_osstr_case_insensitive(&filename, &headPath) == Ordering::Equal {
-						dbg!((&filename, &headPath));
 						fullPath.push(filename);
 						matchingFiles.push(fullPath.to_path_buf());
 						fullPath.pop();
@@ -401,4 +397,148 @@ fn test_osstr_case_insensitive() {
 	let b = OsString::from("def");
 	assert_eq!(compare_osstr_case_insensitive(&a, &b), Ordering::Less);
 	assert_eq!(compare_osstr_case_insensitive(&b, &a), Ordering::Greater);
+}
+
+pub fn resolve_parents(path: &Path) -> PathBuf {
+	let mut res = PathBuf::new();
+	for component in path.components() {
+		if (
+			component == Component::ParentDir &&
+			res != Path::new("/") &&
+			res != Path::new(".")
+		) {
+			res.pop();
+		} else {
+			res.push(component);
+		}
+	}
+	res
+}
+
+#[test]
+fn test_resolve_parents() {
+	assert_eq!(
+		resolve_parents(Path::new("foo")),
+		Path::new("foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo")),
+		Path::new("./foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo")),
+		Path::new("/foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("foo/")),
+		Path::new("foo/")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/")),
+		Path::new("./foo/")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/")),
+		Path::new("/foo/")
+	);
+	
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar")),
+		Path::new("foo/bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar")),
+		Path::new("./foo/bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar")),
+		Path::new("/foo/bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar/")),
+		Path::new("foo/bar/")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar/")),
+		Path::new("./foo/bar/")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar/")),
+		Path::new("/foo/bar/")
+	);
+	
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar/..")),
+		Path::new("foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar/..")),
+		Path::new("./foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar/..")),
+		Path::new("/foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar/../")),
+		Path::new("foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar/../")),
+		Path::new("./foo")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar/../")),
+		Path::new("/foo")
+	);
+	
+	assert_eq!(
+		resolve_parents(Path::new("foo/../bar")),
+		Path::new("bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/../bar")),
+		Path::new("./bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/../bar")),
+		Path::new("/bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("foo/../bar/")),
+		Path::new("bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/../bar/")),
+		Path::new("./bar")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/../bar/")),
+		Path::new("/bar")
+	);
+	
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar/../..")),
+		Path::new("")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar/../..")),
+		Path::new(".")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar/../..")),
+		Path::new("/")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("foo/bar/../../..")),
+		Path::new("")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("./foo/bar/../../..")),
+		Path::new(".")
+	);
+	assert_eq!(
+		resolve_parents(Path::new("/foo/bar/../../..")),
+		Path::new("/")
+	);
 }
