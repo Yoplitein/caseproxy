@@ -9,7 +9,7 @@ use caseproxy::{resolve_parents, AResult, InsensitivePath};
 use clap::Parser;
 use futures_util::TryStreamExt;
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
-use hyper::{body::{Bytes, Frame}, server::conn::http1, service::service_fn, Request, Response, StatusCode};
+use hyper::{body::{Bytes, Frame}, header::HeaderValue, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, UnixListener};
 use tokio_util::io::ReaderStream;
@@ -30,6 +30,12 @@ struct Config {
 
     #[arg(short, long, default_value = "/")]
     urlPrefix: String,
+    
+    #[arg(long, conflicts_with = "nginxUrl")]
+    sendfile: bool,
+    
+    #[arg(long = "nginx", conflicts_with = "sendfile")]
+    nginxUrl: Option<String>,
 }
 
 static serverConfig: OnceLock<Config> = OnceLock::new();
@@ -44,6 +50,15 @@ async fn main() -> AResult<()> {
     }
     if !config.urlPrefix.ends_with("/") {
         config.urlPrefix.push('/');
+    }
+    
+    if let Some(url) = &mut config.nginxUrl {
+        if !url.starts_with("/") {
+            url.insert(0, '/');
+        }
+        if !url.ends_with("/") {
+            url.push('/');
+        }
     }
     
     serverConfig.set(config).unwrap();
@@ -118,16 +133,48 @@ async fn handle_request(
     );
     let file = resolve_path(InsensitivePath(fullPath.clone())).await;
     match file {
+        Err(err) => {
+            Ok(status_response(StatusCode::NOT_FOUND))
+        },
         Ok(file) => {
             // this check is technically unnecessary as it is sufficiently handled by prefix stripping in `find_matching_files`, but just in case that ever changes
             if !file.starts_with(&config.rootPath) {
                 return Ok(status_response(StatusCode::FORBIDDEN));
             }
             
-            send_file(&file).await
-        },
-        Err(err) => {
-            Ok(status_response(StatusCode::NOT_FOUND))
+            if config.sendfile {
+                let file = file.canonicalize()?;
+                let body = Bytes::new();
+                let body = Full::new(body).map_err(|e| match e {}).boxed();
+                let response = Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .header("X-Sendfile", HeaderValue::from_bytes(file.as_os_str().as_encoded_bytes())?)
+                    .body(body)?;
+                Ok(response)
+            } else if let Some(nginxUrl) = &config.nginxUrl {
+                let file = file.strip_prefix(&config.rootPath)?;
+                let body = Bytes::new();
+                let body = Full::new(body).map_err(|e| match e {}).boxed();
+                let mut fullUrl = Vec::new();
+                fullUrl.extend(nginxUrl.as_bytes());
+                fullUrl.extend(file.as_os_str().as_encoded_bytes());
+                let response = Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .header("X-Accel-Redirect", HeaderValue::from_bytes(&fullUrl)?)
+                    .body(body)?;
+                Ok(response)
+            } else {
+                let file = tokio::fs::File::open(file).await?;
+                let length = file.metadata().await?.len();
+                let fileStream = ReaderStream::new(file).map_ok(Frame::data);
+                let body = StreamBody::new(fileStream);
+                let body = BodyExt::map_err(body, |e| anyhow!(e)).boxed();
+                let response = Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Length", format!("{length}"))
+                    .body(body)?;
+                Ok(response)
+            }
         },
     }
 }
@@ -142,30 +189,11 @@ async fn resolve_path(path: InsensitivePath) -> AResult<PathBuf> {
     Ok(files.into_iter().next().ok_or_else(|| anyhow!("not found"))?)
 }
 
-async fn send_file(path: &Path) -> AResult<Response<ABody>> {
-    // TODO: x-sendfile, etc
-    
-    let file = tokio::fs::File::open(path).await?;
-    let length = file.metadata().await?.len();
-    let fileStream = ReaderStream::new(file).map_ok(Frame::data);
-    let body = StreamBody::new(fileStream);
-    let body = BodyExt::map_err(body, |e| anyhow!(e)).boxed();
-    let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Length", format!("{length}"))
-        .body(body)?;
-    Ok(resp)
-}
-
-fn static_body(body: &'static str) -> ABody {
-    let body = Bytes::from_static(body.as_bytes());
-    let body = Full::new(body).map_err(|e| match e {}).boxed();
-    body
-}
-
 fn status_response(code: StatusCode) -> Response<ABody> {
     let message = code.canonical_reason().unwrap_or("unknown");
-    let mut res = Response::new(static_body(message));
+    let body = Bytes::from_static(message.as_bytes());
+    let body = Full::new(body).map_err(|e| match e {}).boxed();
+    let mut res = Response::new(body);
     *res.status_mut() = code;
     res
 }
