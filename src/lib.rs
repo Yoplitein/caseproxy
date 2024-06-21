@@ -394,8 +394,10 @@ fn test_osstr_case_insensitive() {
 pub fn resolve_parents(path: &Path) -> PathBuf {
     let mut res = PathBuf::new();
     for component in path.components() {
-        if (component == Component::ParentDir && res != Path::new("/") && res != Path::new(".")) {
-            res.pop();
+        if component == Component::ParentDir {
+            if res != Path::new("/") && res != Path::new(".") {
+                res.pop();
+            }
         } else {
             res.push(component);
         }
