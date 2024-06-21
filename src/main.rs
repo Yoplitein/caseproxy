@@ -14,27 +14,59 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, UnixListener};
 use tokio_util::io::ReaderStream;
 
+/**
+    A static file server that matches paths case-insensitively.
+*/
 #[derive(Debug, Parser)]
 struct Config {
+    /// TCP port to listen on. 
     #[arg(short, long, conflicts_with = "socketPath")]
     port: Option<i16>,
 
+    /// Host to listen on when using TCP.
     #[arg(short = 'H', long, requires = "port", default_value = "localhost")]
     host: String,
-
+    
+    /// Path to Unix socket to listen on.
     #[arg(short, long, conflicts_with = "port")]
     socketPath: Option<PathBuf>,
-
+    
+    /// Root directory to serve files from.
     #[arg(short, long, default_value = ".")]
     rootPath: PathBuf,
-
+    
+    /// A prefix that should be stripped from request URLs before resolving on-disk paths.
     #[arg(short, long, default_value = "/")]
     urlPrefix: String,
     
+    /**
+        Whether to use `X-Sendfile` header.
+        
+        Signals the proxying httpd to serve the resolved file directly. Only supported by Apache and lighttpd.
+    */
     #[arg(long, conflicts_with = "nginxUrl")]
     sendfile: bool,
     
-    #[arg(long = "nginx", conflicts_with = "sendfile")]
+    // verbatim_doc_comment doesn't even strip leading whitespace lmao
+    /**
+URL prefix to use with `X-Accel-Redirect` header, which can be used to
+signal the proxying httpd to serve the resolved file directly with
+appropriate configuration. Only supported by nginx.
+
+The path on disk relative to `--root-path` will be appended to this
+value and sent to nginx triggering an internal redirect. For example,
+a value of `/files/_caseproxied/` will work with an nginx configuration like;
+```
+location /files {
+    proxy_pass ...;
+    location /files/_caseproxied {
+        alias ...; # full path to `--root-path`
+        internal; # optional, location only matches when redirected via `X-Accel-Redirect`
+    }
+}
+```
+    */
+    #[arg(long = "nginx", conflicts_with = "sendfile", verbatim_doc_comment, help = "URL prefix to use with `X-Accel-Redirect` header")]
     nginxUrl: Option<String>,
 }
 
@@ -43,7 +75,13 @@ static serverConfig: OnceLock<Config> = OnceLock::new();
 #[tokio::main]
 async fn main() -> AResult<()> {
     let expanded = argfile::expand_args(argfile::parse_fromfile, argfile::PREFIX)?;
-    let mut config = Config::try_parse_from(expanded)?;
+    let mut config = match Config::try_parse_from(expanded) {
+        Ok(config) => config,
+        Err(err) => {
+            err.print();
+            std::process::exit(1)
+        },
+    };
     
     if !config.urlPrefix.starts_with("/") {
         config.urlPrefix.insert(0, '/');
