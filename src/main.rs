@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use caseproxy::{resolve_parents, AResult, InsensitivePath};
+use caseproxy::{resolve_parents, AResult, Deferred, InsensitivePath};
 use clap::Parser;
 use futures_util::TryStreamExt;
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
@@ -79,7 +79,10 @@ async fn main() -> AResult<()> {
     macro_rules! main_loop {
         ($listener:ident) => {
             loop {
-                let (client, clientAddr) = $listener.accept().await?;
+                let (client, clientAddr) = tokio::select! {
+                    pair = $listener.accept() => { pair? }
+                    _ = tokio::signal::ctrl_c() => { break }
+                };
                 let io = TokioIo::new(client);
                 tokio::task::spawn(async move {
                     let res = http1::Builder::new()
@@ -109,13 +112,21 @@ async fn main() -> AResult<()> {
         candidateAddresses.sort_by(|l, r| l.is_ipv6().cmp(&r.is_ipv6()));
 
         let mut listener = TcpListener::bind(candidateAddresses.first().unwrap()).await?;
-        main_loop!(listener)
+        main_loop!(listener);
     } else if let Some(socketPath) = &config.socketPath {
         let mut listener = UnixListener::bind(socketPath)?;
-        main_loop!(listener)
+        let removeSocket = Deferred::new(|| match std::fs::remove_file(socketPath) {
+            Ok(_) => {},
+            Err(err) => {
+                eprintln!("couldn't remove server socket {socketPath:?}: {err:#?}");
+            },
+        });
+        main_loop!(listener);
     } else {
         unreachable!()
     }
+    
+    Ok(())
 }
 
 type ABody = BoxBody<Bytes, anyhow::Error>;

@@ -178,10 +178,10 @@ fn test_insensitive_path() {
 	assert_ne!(aHash, bHash);
 }
 
-struct Deferred<Func: FnOnce()>(Option<Func>);
+pub struct Deferred<Func: FnOnce()>(Option<Func>);
 
 impl<Func: FnOnce()> Deferred<Func> {
-	fn new(func: Func) -> Self {
+	pub fn new(func: Func) -> Self {
 		Self(Some(func))
 	}
 }
